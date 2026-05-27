@@ -12,6 +12,14 @@ After GitHub Pages is enabled for this repository, these files are published fro
 - `full.json` — full report
 - `v2ray.txt` — Base64 encoded list
 
+
+## Cloudflare Worker
+
+- Worker: https://cf-proxyip-us.horjane.workers.dev/
+- IPv4 list: https://cf-proxyip-us.horjane.workers.dev/all.txt
+
+Current note: the local Cloudflare-edge HTTP check can find reachable candidates, but cmliu's TCP socket checker reports the current sample as invalid. Treat the list as deployment output, not guaranteed usable ProxyIP.
+
 ## Run locally
 
 ```bash
