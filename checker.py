@@ -118,7 +118,7 @@ async def fetch_remote_source(session: aiohttp.ClientSession, url: str) -> list[
 
 def default_fofa_query(country: str) -> str:
     country_code = (country or "US").split(",", 1)[0].strip().upper() or "US"
-    return f'country="{country_code}" && port="443" && (header="cloudflare" || cert.issuer.org="Cloudflare, Inc.")'
+    return f'server=="cloudflare" && header="Forbidden" && asn!="13335" && asn!="209242" && country="{country_code}" && port="443"'
 
 
 async def fetch_fofa_candidates(

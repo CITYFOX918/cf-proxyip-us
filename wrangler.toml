@@ -1,0 +1,6 @@
+name = "cf-proxyip-us"
+main = "worker.js"
+compatibility_date = "2026-05-27"
+
+[observability]
+enabled = true
