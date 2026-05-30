@@ -56,26 +56,48 @@ def validate_outputs() -> None:
         raise RuntimeError("docs/full.json count does not match docs/all.txt")
 
 
+def live_top5_matches(expected: list[str], attempts: int = 6, delay_seconds: int = 10) -> bool:
+    for attempt in range(1, attempts + 1):
+        status, top5_live = fetch(f"{LIST_DOMAIN}/top5.txt?t={TOKEN}&r={int(time.time())}")
+        if status == 200:
+            live_ips = [x.strip() for x in top5_live.splitlines() if x.strip()]
+            if live_ips == expected:
+                return True
+            print(f"Live top5 mismatch attempt {attempt}/{attempts}: {live_ips} != {expected}", flush=True)
+        else:
+            print(f"top5 endpoint failed attempt {attempt}/{attempts}: {status} {top5_live[:120]}", flush=True)
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+    return False
+
+
+def dns_matches(expected: list[str], attempts: int = 6, delay_seconds: int = 10) -> bool:
+    sorted_expected = sorted(expected)
+    for attempt in range(1, attempts + 1):
+        resolved = sorted({info[4][0] for info in socket.getaddrinfo(PROXY_DOMAIN, 443, family=socket.AF_INET, type=socket.SOCK_STREAM)})
+        if resolved == sorted_expected:
+            return True
+        print(f"DNS mismatch attempt {attempt}/{attempts}: {resolved} != {sorted_expected}", flush=True)
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+    return False
+
+
 def verify_live() -> None:
     status, health = fetch(f"{LIST_DOMAIN}/health?t={TOKEN}&r={int(time.time())}")
     if status != 200:
         raise RuntimeError(f"health endpoint failed: {status} {health[:120]}")
-    status, top5_live = fetch(f"{LIST_DOMAIN}/top5.txt?t={TOKEN}&r={int(time.time())}")
-    if status != 200:
-        raise RuntimeError(f"top5 endpoint failed: {status} {top5_live[:120]}")
-    live_ips = [x.strip() for x in top5_live.splitlines() if x.strip()]
-    if live_ips != current_top5():
-        raise RuntimeError(f"Live top5 mismatch: {live_ips} != {current_top5()}")
+    expected = current_top5()
+    if not live_top5_matches(expected):
+        raise RuntimeError("Live top5 did not match current docs/top5.txt after retries")
     denied, _ = fetch(f"{LIST_DOMAIN}/all.txt?r={int(time.time())}")
     if denied != 403:
         raise RuntimeError(f"Unauthenticated all.txt should be 403, got {denied}")
     bot, _ = fetch(f"{LIST_DOMAIN}/all.txt?t={TOKEN}&r={int(time.time())}", ua="curl/8.0")
     if bot != 403:
         raise RuntimeError(f"curl UA should be 403, got {bot}")
-    resolved = sorted({info[4][0] for info in socket.getaddrinfo(PROXY_DOMAIN, 443, family=socket.AF_INET, type=socket.SOCK_STREAM)})
-    expected = sorted(current_top5())
-    if resolved != expected:
-        raise RuntimeError(f"DNS mismatch: {resolved} != {expected}")
+    if not dns_matches(expected):
+        raise RuntimeError("DNS records did not match current docs/top5.txt after retries")
 
 
 def main() -> None:
