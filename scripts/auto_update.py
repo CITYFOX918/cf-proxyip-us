@@ -146,6 +146,7 @@ def main() -> None:
     time.sleep(60)
 
     verify_live()
+    run([sys.executable, "scripts/audit.py"])
 
     changed = before != after or git_dirty()
     if changed:
