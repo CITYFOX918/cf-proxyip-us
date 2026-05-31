@@ -37,6 +37,19 @@ export default {
       }, true);
     }
 
+    // /token returns the HMAC token for programmatic access (cookie-authenticated)
+    if (url.pathname === "/token") {
+      const authErr = await verifyAccess(request, url, env);
+      if (authErr) return deny(authErr);
+      const secret = env.PROXYIP_SECRET || "";
+      const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+      if (secret) {
+        const hex = await hmacHex(secret, today);
+        return json({ token: `${today}-${hex}`, date: today, mode: "hmac" }, false);
+      }
+      return json({ token: today, date: today, mode: "legacy" }, false);
+    }
+
     // Auth gate for data endpoints
     if (TEXT_PATHS.has(url.pathname) || JSON_PATHS.has(url.pathname)) {
       const authErr = await verifyAccess(request, url, env);
@@ -77,7 +90,7 @@ export default {
   }
 };
 
-// ── Data loading (KV only, no hardcoded fallback) ──
+// ── Data loading (KV only) ──
 
 async function loadResult(env) {
   if (env.PROXYIP_KV) {
@@ -122,18 +135,10 @@ async function hmacHex(secret, message) {
 
 // ── Helpers ──
 
-function currentIp(result) {
-  return result.current?.ip || result.state?.current_ip || null;
-}
-function standby(result) {
-  return Array.isArray(result.standby) ? result.standby : [];
-}
-function top5(result) {
-  return (Array.isArray(result.recommended_top5) ? result.recommended_top5 : []).map((item) => item.ip).filter(Boolean);
-}
-function lines(items) {
-  return items.join("\n") + (items.length ? "\n" : "");
-}
+function currentIp(result) { return result.current?.ip || result.state?.current_ip || null; }
+function standby(result) { return Array.isArray(result.standby) ? result.standby : []; }
+function top5(result) { return (Array.isArray(result.recommended_top5) ? result.recommended_top5 : []).map((i) => i.ip).filter(Boolean); }
+function lines(items) { return items.join("\n") + (items.length ? "\n" : ""); }
 
 // ── Response builders ──
 
@@ -167,7 +172,112 @@ function escapeHtml(value) {
 function renderHome(result, url) {
   const s = result.summary || {};
   const valid = Array.isArray(result.valid_ips) ? result.valid_ips : [];
-  const token = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const rows = valid.slice(0, 30).map((item, i) => `<tr><td>${i + 1}</td><td><code>${escapeHtml(item.ip)}</code></td><td>${escapeHtml(item.portRemote || 443)}</td><td>${escapeHtml(item.colo || "")}</td><td>${escapeHtml(item.latency_ms ?? "")}</td></tr>`).join("");
-  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow,noarchive"><title>ProxyIP US IPv4</title><style>body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:960px;margin:40px auto;padding:0 20px;line-height:1.55;color:#111827}a{color:#2563eb}code{background:#f3f4f6;padding:2px 5px;border-radius:4px}.card{display:inline-block;border:1px solid #e5e7eb;border-radius:12px;padding:14px 18px;margin:6px 8px 6px 0;background:#fafafa}.card b{display:block;font-size:24px}table{width:100%;border-collapse:collapse;margin-top:14px}td,th{border-bottom:1px solid #e5e7eb;padding:9px;text-align:left}.muted{color:#6b7280}.ok{color:#047857}</style></head><body><h1>ProxyIP US IPv4</h1><p class="muted">只收錄 <code>https://zip.cm.edu.kg/all.txt</code> 中標記 <code>#US</code>、端口 <code>443</code>、且 cmliu 檢測 <code>supports_ipv4=true</code> 的結果。</p><div class="card">cmliu valid<b class="ok">${escapeHtml(s.cmliu_ipv4_valid ?? valid.length)}</b></div><div class="card">candidates<b>${escapeHtml(s.total_candidates ?? valid.length)}</b></div><div class="card">checked<b>${escapeHtml(s.checked_at || "unknown")}</b></div><h2>Current Stable ProxyIP</h2><p><code>${escapeHtml(currentIp(result) || "none")}</code></p><h2>Endpoints</h2><ul><li><a href="/current.txt?t=${token}">current.txt</a></li><li><a href="/current.json?t=${token}">current.json</a></li><li><a href="/standby.txt?t=${token}">standby.txt</a></li><li><a href="/all.txt?t=${token}">all.txt</a></li><li><a href="/us.txt?t=${token}">us.txt</a></li><li><a href="/top5.txt?t=${token}">top5.txt</a></li><li><a href="/best.txt?t=${token}">best.txt</a></li><li><a href="/history.json?t=${token}">history.json</a></li><li><a href="/full.json?t=${token}">full.json</a></li><li><a href="/v2ray.txt?t=${token}">v2ray.txt</a></li></ul><p class="muted">接口有基礎反爬保護：需先訪問首頁取得 cookie，或使用當天 token <code>?t=YYYYMMDD</code>。</p></body></html>`;
+  const current = currentIp(result);
+  const standbyCount = standby(result).length;
+  const top5Ips = top5(result);
+  const checkedAt = s.checked_at || "unknown";
+  const rows = valid.slice(0, 30).map((item, i) =>
+    `<tr><td>${i + 1}</td><td><code>${escapeHtml(item.ip)}</code></td><td>${escapeHtml(item.portRemote || 443)}</td><td>${escapeHtml(item.colo || "")}</td><td>${escapeHtml(item.latency_ms ?? "")}</td></tr>`
+  ).join("");
+
+  return `<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<title>ProxyIP US IPv4</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:960px;margin:40px auto;padding:0 20px;line-height:1.55;color:#111827;background:#fff}
+h1{margin-bottom:4px}h2{margin-top:28px;margin-bottom:8px}
+a{color:#2563eb;text-decoration:none}a:hover{text-decoration:underline}
+code{background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:0.9em}
+.card{display:inline-block;border:1px solid #e5e7eb;border-radius:12px;padding:14px 18px;margin:6px 8px 6px 0;background:#fafafa}
+.card b{display:block;font-size:24px}
+.current-ip{font-size:20px;font-weight:600;color:#047857;background:#ecfdf5;display:inline-block;padding:8px 16px;border-radius:8px;border:1px solid #a7f3d0}
+table{width:100%;border-collapse:collapse;margin-top:14px}td,th{border-bottom:1px solid #e5e7eb;padding:9px;text-align:left;font-size:14px}
+th{font-weight:600;background:#f9fafb}
+.muted{color:#6b7280;font-size:13px}.ok{color:#047857}
+.endpoint-list{list-style:none;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px}
+.endpoint-list li{margin:0}
+.endpoint-list a{display:block;padding:8px 12px;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa;font-family:monospace;font-size:13px}
+.endpoint-list a:hover{background:#f0f9ff;border-color:#93c5fd}
+#token-box{background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:12px 16px;margin:12px 0;font-family:monospace;font-size:13px;word-break:break-all;display:none;position:relative}
+#token-box .copy-btn{position:absolute;top:8px;right:8px;background:#047857;color:#fff;border:none;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px}
+#token-box .copy-btn:hover{background:#065f46}
+.status-row{display:flex;gap:12px;flex-wrap:wrap;margin:8px 0}
+.status-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:500}
+.status-chip.ok{background:#ecfdf5;color:#047857;border:1px solid #a7f3d0}
+.status-chip.info{background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe}
+</style>
+</head>
+<body>
+<h1>ProxyIP US IPv4</h1>
+<p class="muted">只收錄 <code>zip.cm.edu.kg/all.txt</code> 中標記 <code>#US</code>、端口 <code>443</code>、且 cmliu 檢測 <code>supports_ipv4=true</code> 的結果。</p>
+
+<div class="status-row">
+  <span class="status-chip ok">✓ cmliu valid: <b>${escapeHtml(s.cmliu_ipv4_valid ?? valid.length)}</b></span>
+  <span class="status-chip info">candidates: <b>${escapeHtml(s.total_candidates ?? valid.length)}</b></span>
+  <span class="status-chip info">standby: <b>${standbyCount}</b></span>
+</div>
+<p class="muted">Last checked: ${escapeHtml(checkedAt)}</p>
+
+<h2>Current Stable ProxyIP</h2>
+<div class="current-ip">${escapeHtml(current || "none")}</div>
+
+<h2>Top 5</h2>
+<p>${top5Ips.map((ip, i) => `<code>${escapeHtml(ip)}</code>`).join(" &nbsp; ")}</p>
+
+<h2>Endpoints</h2>
+<p class="muted">訪問首頁後 cookie 自動生效，點擊即可查看數據。程式化訪問請用 <a href="/token">/token</a> 取得 HMAC token。</p>
+<ul class="endpoint-list">
+  <li><a href="/current.txt">current.txt</a></li>
+  <li><a href="/current.json">current.json</a></li>
+  <li><a href="/standby.txt">standby.txt</a></li>
+  <li><a href="/top5.txt">top5.txt</a></li>
+  <li><a href="/all.txt">all.txt</a></li>
+  <li><a href="/us.txt">us.txt</a></li>
+  <li><a href="/best.txt">best.txt</a></li>
+  <li><a href="/v2ray.txt">v2ray.txt</a></li>
+  <li><a href="/history.json">history.json</a></li>
+  <li><a href="/full.json">full.json</a></li>
+  <li><a href="/token">🔑 /token</a></li>
+  <li><a href="/health">💚 /health</a></li>
+</ul>
+
+<h2>API Token</h2>
+<button onclick="fetchToken()" style="background:#2563eb;color:#fff;border:none;border-radius:8px;padding:10px 20px;cursor:pointer;font-size:14px">生成今日 HMAC Token</button>
+<div id="token-box"><button class="copy-btn" onclick="copyToken()">複製</button><span id="token-value"></span></div>
+<p class="muted">程式化用法：<code>curl -A "Mozilla/5.0" "https://list.leilaomi.cc.cd/current.txt?t=TOKEN"</code></p>
+
+<h2>IP List (Top 30)</h2>
+<table>
+<thead><tr><th>#</th><th>IP</th><th>Port</th><th>Colo</th><th>Latency</th></tr></thead>
+<tbody>${rows}</tbody>
+</table>
+
+<p class="muted" style="margin-top:40px">Built on <a href="https://zocomputer.com" target="_blank">Zo Computer</a></p>
+
+<script>
+async function fetchToken() {
+  try {
+    const r = await fetch('/token');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    document.getElementById('token-value').textContent = d.token;
+    document.getElementById('token-box').style.display = 'block';
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+function copyToken() {
+  const t = document.getElementById('token-value').textContent;
+  navigator.clipboard.writeText(t).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    btn.textContent = '✓ Copied';
+    setTimeout(() => btn.textContent = '複製', 1500);
+  });
+}
+</script>
+</body>
+</html>`;
 }
