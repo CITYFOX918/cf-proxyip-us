@@ -1,0 +1,23 @@
+[
+  {
+    "switched_at": "2026-05-31T15:11:50.428948+00:00",
+    "from": null,
+    "to": "43.170.25.96",
+    "reason": "initial_selection",
+    "failure_count": 0,
+    "new_score": 99015,
+    "new_risk": {
+      "cf_bot_score": 99,
+      "corporate_proxy": false,
+      "verified_bot": false,
+      "penalty": 1035,
+      "grade": "low",
+      "asn": 139341,
+      "as_organization": "ACE",
+      "exit_ip": "43.152.135.109",
+      "country": "US",
+      "city": "Ashburn",
+      "colo": "IAD"
+    }
+  }
+]

@@ -1,12 +1,15 @@
 # ProxyIP US IPv4
 
-Cloudflare Worker + DNS-only ProxyIP 專案：`list.leilaomi.cc.cd` 分發資料；`proxyip.leilaomi.cc.cd` 直接解析到 5 個低風險最優 ProxyIP。
+Cloudflare Worker + DNS-only ProxyIP 專案：`list.leilaomi.cc.cd` 分發資料；`proxyip.leilaomi.cc.cd` 只解析到 1 個低風險且穩定的主 ProxyIP。當前主 IP 仍有效時不切換，連續失效後才 failover。
 
 ## 線上地址
 
-- ProxyIP 域名（DNS-only A 記錄）：`proxyip.leilaomi.cc.cd`
+- ProxyIP 域名（DNS-only 單 A 記錄）：`proxyip.leilaomi.cc.cd`
 - Worker 入口頁：https://list.leilaomi.cc.cd/
-- 推薦 Top 5：https://list.leilaomi.cc.cd/top5.txt?t=YYYYMMDD
+- 當前主 ProxyIP：https://list.leilaomi.cc.cd/current.txt?t=YYYYMMDD
+- 當前主 ProxyIP 詳情：https://list.leilaomi.cc.cd/current.json?t=YYYYMMDD
+- 備用候選：https://list.leilaomi.cc.cd/standby.txt?t=YYYYMMDD
+- 推薦 Top 5（當前 + 備用，不直接全量寫入 DNS）：https://list.leilaomi.cc.cd/top5.txt?t=YYYYMMDD
 - 全量列表：https://list.leilaomi.cc.cd/all.txt?t=YYYYMMDD
 - US 列表：https://list.leilaomi.cc.cd/us.txt?t=YYYYMMDD
 - Top 20：https://list.leilaomi.cc.cd/best.txt?t=YYYYMMDD
@@ -31,7 +34,12 @@ Cloudflare Worker + DNS-only ProxyIP 專案：`list.leilaomi.cc.cd` 分發資料
 
 輸出文件在 `docs/`：
 
-- `file docs/top5.txt`：5 個低風險最優 IP，用於 `proxyip.leilaomi.cc.cd` DNS-only A 記錄
+- `file docs/current.txt`：1 個當前穩定主 IP，用於 `proxyip.leilaomi.cc.cd` DNS-only 單 A 記錄
+- `file docs/current.json`：當前主 IP 詳情與狀態
+- `file docs/state.json`：failover 狀態、連續失敗次數、最近成功時間
+- `file docs/history.json`：切換歷史
+- `file docs/standby.txt`：備用候選池
+- `file docs/top5.txt`：當前主 IP + 前 4 個備用候選
 - `file docs/all.txt`：207 個通過 IPv4 檢測的 IP
 - `file docs/us.txt`：同 `file all.txt`
 - `file docs/best.txt`：前 20 個
@@ -43,7 +51,7 @@ Cloudflare Worker + DNS-only ProxyIP 專案：`list.leilaomi.cc.cd` 分發資料
 
 - Worker name：`cf-proxyip-us`
 - Worker 自定義域名：`list.leilaomi.cc.cd`
-- ProxyIP DNS-only 域名：`proxyip.leilaomi.cc.cd`，5 條 A 記錄、灰雲、不經 Cloudflare 代理
+- ProxyIP DNS-only 域名：`proxyip.leilaomi.cc.cd`，1 條 A 記錄、灰雲、不經 Cloudflare 代理
 - 主域 `leilaomi.cc.cd` **不綁定**此 Worker；實測不命中本 Worker
 - `workers.dev` 與 preview URL 已在配置中關閉，不作為對外地址；實測 `cf-proxyip-us.horjane.workers.dev` 返回 404/1042
 
@@ -94,9 +102,9 @@ python3 scripts/auto_update.py
 它會自動：
 
 1. 重新生成數據；
-2. 選出低風險且 ASN 分散的 Top 5；
+2. 檢測當前主 IP；仍有效則保持不變；連續失效後才從候選池 failover；
 3. 把精簡數據內嵌到 Worker；
-4. 同步 `proxyip.leilaomi.cc.cd` 的 5 條 DNS-only A 記錄；
+4. 同步 `proxyip.leilaomi.cc.cd` 的 1 條 DNS-only A 記錄；
 5. 部署 Worker；
 6. 驗證 `list.leilaomi.cc.cd`、接口防護、DNS Top 5；
 7. 若數據有變化，自動 commit 並 push 到 GitHub。

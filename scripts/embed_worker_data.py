@@ -5,6 +5,9 @@ import re
 from pathlib import Path
 
 FULL_JSON = Path("docs/full.json")
+CURRENT_JSON = Path("docs/current.json")
+STATE_JSON = Path("docs/state.json")
+HISTORY_JSON = Path("docs/history.json")
 WORKER_JS = Path("worker.js")
 
 
@@ -30,8 +33,15 @@ def slim_item(item: dict) -> dict:
 
 def main() -> None:
     full = json.loads(FULL_JSON.read_text(encoding="utf-8"))
+    current_doc = json.loads(CURRENT_JSON.read_text(encoding="utf-8")) if CURRENT_JSON.exists() else {}
+    state = json.loads(STATE_JSON.read_text(encoding="utf-8")) if STATE_JSON.exists() else {}
+    history = json.loads(HISTORY_JSON.read_text(encoding="utf-8")) if HISTORY_JSON.exists() else []
     slim = {
         "summary": full["summary"],
+        "current": current_doc.get("current"),
+        "state": state,
+        "history": history[-50:],
+        "standby": [slim_item(x) for x in full.get("standby", [])],
         "recommended_top5": [slim_item(x) for x in full.get("recommended_top5", [])],
         "valid_ips": [slim_item(x) for x in full.get("valid_ips", [])],
     }
@@ -41,7 +51,12 @@ def main() -> None:
     if updated == content:
         raise SystemExit("worker.js DEFAULT_RESULT block was not updated")
     WORKER_JS.write_text(updated, encoding="utf-8")
-    print(json.dumps({"embedded_valid": len(slim["valid_ips"]), "embedded_top5": [x["ip"] for x in slim["recommended_top5"]]}, ensure_ascii=False))
+    print(json.dumps({
+        "embedded_current": (slim.get("current") or {}).get("ip"),
+        "embedded_standby": [x["ip"] for x in slim["standby"][:5]],
+        "embedded_valid": len(slim["valid_ips"]),
+        "embedded_top5": [x["ip"] for x in slim["recommended_top5"]],
+    }, ensure_ascii=False))
 
 
 if __name__ == "__main__":

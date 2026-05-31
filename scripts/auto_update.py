@@ -33,6 +33,19 @@ def fetch(url: str, ua: str = "Mozilla/5.0") -> tuple[int, str]:
         return getattr(exc, "code", 0) or 0, str(exc)
 
 
+def current_primary() -> str | None:
+    path = Path("docs/current.txt")
+    if path.exists():
+        rows = [x.strip() for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+        if rows:
+            return rows[0]
+    path = Path("docs/top5.txt")
+    if path.exists():
+        rows = [x.strip() for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+        if rows:
+            return rows[0]
+    return None
+
 def current_top5() -> list[str]:
     path = Path("docs/top5.txt")
     if not path.exists():
@@ -40,14 +53,24 @@ def current_top5() -> list[str]:
     return [x.strip() for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
 
 
+def current_ip() -> str:
+    path = Path("docs/current.txt")
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
 def git_dirty() -> bool:
     return bool(capture(["git", "status", "--short"], check=False).strip())
 
 
 def validate_outputs() -> None:
-    top5 = current_top5()
-    if len(top5) != 5:
-        raise RuntimeError(f"Expected 5 top5 IPs, got {len(top5)}")
+    primary = current_primary()
+    if not primary:
+        raise RuntimeError("Missing docs/current.txt primary ProxyIP")
+    dns_rows = json.loads(Path("docs/dns-records.json").read_text(encoding="utf-8"))
+    if len(dns_rows) != 1 or dns_rows[0].get("content") != primary:
+        raise RuntimeError("docs/dns-records.json must contain exactly the current primary IP")
     all_ips = [x.strip() for x in Path("docs/all.txt").read_text(encoding="utf-8").splitlines() if x.strip()]
     if len(all_ips) < 5:
         raise RuntimeError("Too few valid IPs")
@@ -56,21 +79,21 @@ def validate_outputs() -> None:
         raise RuntimeError("docs/full.json count does not match docs/all.txt")
 
 
-def live_top5_matches(expected: list[str], attempts: int = 15, delay_seconds: int = 15) -> bool:
+def live_current_matches(expected: list[str], attempts: int = 15, delay_seconds: int = 15) -> bool:
     """✅ 修复: 增加重试次数和等待时间，Cloudflare DNS 全球同步需要 2-8 分钟"""
     for attempt in range(1, attempts + 1):
-        status, top5_live = fetch(f"{LIST_DOMAIN}/top5.txt?t={TOKEN}&r={int(time.time())}")
+        status, current_live = fetch(f"{LIST_DOMAIN}/current.txt?t={TOKEN}&r={int(time.time())}")
         if status == 200:
-            live_ips = [x.strip() for x in top5_live.splitlines() if x.strip()]
+            live_ips = [x.strip() for x in current_live.splitlines() if x.strip()]
             if live_ips == expected:
                 return True
-            print(f"Live top5 mismatch attempt {attempt}/{attempts}: {live_ips} != {expected}", flush=True)
+            print(f"Live current mismatch attempt {attempt}/{attempts}: {live_ips} != {expected}", flush=True)
         else:
-            print(f"top5 endpoint failed attempt {attempt}/{attempts}: {status} {top5_live[:120]}", flush=True)
+            print(f"current endpoint failed attempt {attempt}/{attempts}: {status} {current_live[:120]}", flush=True)
         if attempt < attempts:
             time.sleep(delay_seconds)
     # ✅ 修复: Cloudflare DNS 经常有一个 IP 延迟同步，允许 4/5 匹配就算成功
-    print("⚠️  Top5 校验超时，不阻断流程，DNS 会在后台自动同步", flush=True)
+    print("⚠️  Current 校验超时，不阻断流程，DNS 会在后台自动同步", flush=True)
     return True
 
 
@@ -97,8 +120,9 @@ def verify_live() -> None:
         print(f"⚠️  health endpoint 暂时未就绪: {status} {health[:120]}，不阻断流程", flush=True)
         return
 
-    expected = current_top5()
-    live_top5_matches(expected)
+    primary = current_primary()
+    expected = [primary] if primary else []
+    live_current_matches(expected)
 
     denied, _ = fetch(f"{LIST_DOMAIN}/all.txt?r={int(time.time())}")
     if denied != 403:
@@ -108,10 +132,10 @@ def verify_live() -> None:
 
 
 def main() -> None:
-    before = current_top5()
+    before = current_primary()
     run([sys.executable, "build_dataset.py"])
     validate_outputs()
-    after = current_top5()
+    after = current_primary()
     run([sys.executable, "scripts/embed_worker_data.py"])
     run([sys.executable, "scripts/sync_dns.py"])
     run(["wrangler", "deploy"])
@@ -125,13 +149,13 @@ def main() -> None:
     changed = before != after or git_dirty()
     if changed:
         run(["git", "add", "."])
-        message = "Auto update ProxyIP top5" if before != after else "Auto refresh ProxyIP data"
+        message = "Auto switch stable ProxyIP" if before != after else "Auto refresh ProxyIP data"
         run(["git", "commit", "-m", message], check=False)
         run(["git", "push"])
     summary = {
-        "changed_top5": before != after,
-        "old_top5": before,
-        "new_top5": after,
+        "changed_current": before != after,
+        "old_current": before,
+        "new_current": after,
         "valid_count": len([x for x in Path("docs/all.txt").read_text().splitlines() if x.strip()]),
         "list_domain": LIST_DOMAIN,
         "proxy_domain": PROXY_DOMAIN,
