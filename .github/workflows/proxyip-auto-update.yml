@@ -18,15 +18,17 @@ jobs:
     timeout-minutes: 45
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      PROXYIP_HMAC_SECRET: ${{ secrets.PROXYIP_HMAC_SECRET }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Wrangler
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
       - name: Install Wrangler
         run: npm install -g wrangler@4

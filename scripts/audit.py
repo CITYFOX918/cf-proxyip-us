@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -9,11 +12,19 @@ import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-TOKEN = time.strftime("%Y%m%d", time.gmtime())
 LIST_DOMAIN = "https://list.leilaomi.cc.cd"
 PROXY_DOMAIN = "proxyip.leilaomi.cc.cd"
 KV_NAMESPACE_ID = "6d911271a65f4e67a39e22d991edb961"
 TARGET_COUNTRIES = {"US"}
+
+
+def hmac_token() -> str:
+    """Generate today's HMAC token, matching the Worker's verifyToken()."""
+    secret = os.environ.get("PROXYIP_HMAC_SECRET", "")
+    if not secret:
+        raise SystemExit("Missing PROXYIP_HMAC_SECRET env var")
+    date_str = time.strftime("%Y%m%d", time.gmtime())
+    return hmac.new(secret.encode(), date_str.encode(), hashlib.sha256).hexdigest()
 
 
 def fetch(url: str) -> tuple[int, str]:
@@ -47,12 +58,14 @@ def kv_get(key: str) -> str:
 
 
 def main() -> None:
+    token = hmac_token()
     current = Path("docs/current.txt").read_text(encoding="utf-8").strip()
     current_json = read_json("docs/current.json")
     state = read_json("docs/state.json")
     full = read_json("docs/full.json")
     dns_records = read_json("docs/dns-records.json")
 
+    # Local file consistency checks
     assert_true(bool(current), "docs/current.txt is empty")
     assert_true(state.get("current_ip") == current, "state current_ip does not match current.txt")
     assert_true(current_json.get("current", {}).get("ip") == current, "current.json does not match current.txt")
@@ -66,17 +79,29 @@ def main() -> None:
     bad_standby = [(x.get("ip"), x.get("risk", {}).get("country")) for x in standby if (x.get("risk", {}).get("country") or "").upper() not in TARGET_COUNTRIES]
     assert_true(not bad_standby, f"standby contains non-target countries: {bad_standby[:5]}")
 
+    # DNS resolution check
     resolved = dns_ips()
     assert_true(resolved == [current], f"DNS must resolve to exactly current IP: {resolved} != {[current]}")
 
-    status, body = fetch(f"{LIST_DOMAIN}/current.txt?t={TOKEN}&r={int(time.time())}")
+    # Live endpoint checks (using HMAC token)
+    status, body = fetch(f"{LIST_DOMAIN}/current.txt?t={token}&r={int(time.time())}")
     assert_true(status == 200 and body.strip() == current, f"live current.txt mismatch: {status} {body[:120]}")
 
-    status, body = fetch(f"{LIST_DOMAIN}/health?t={TOKEN}&r={int(time.time())}")
+    status, body = fetch(f"{LIST_DOMAIN}/health?t={token}&r={int(time.time())}")
     assert_true(status == 200, f"live health failed: {status} {body[:120]}")
     health = json.loads(body)
     assert_true(health.get("current") == current, "live health current mismatch")
 
+    # Token rejection check: old YYYYMMDD token should now be rejected
+    old_token = time.strftime("%Y%m%d", time.gmtime())
+    status_bad, _ = fetch(f"{LIST_DOMAIN}/all.txt?t={old_token}&r={int(time.time())}")
+    assert_true(status_bad == 403, f"Old YYYYMMDD token should be rejected but got HTTP {status_bad}")
+
+    # Unauthenticated check
+    status_noauth, _ = fetch(f"{LIST_DOMAIN}/all.txt?r={int(time.time())}")
+    assert_true(status_noauth == 403, f"Unauthenticated request should be rejected but got HTTP {status_noauth}")
+
+    # KV consistency check
     try:
         kv_current = kv_get("current_txt")
         assert_true(kv_current == current, f"KV current_txt mismatch: {kv_current} != {current}")
@@ -90,6 +115,7 @@ def main() -> None:
         "dns": resolved,
         "standby_count": len(standby),
         "health_count": health.get("count"),
+        "token": "hmac",
     }, ensure_ascii=False, indent=2))
 
 
