@@ -25,6 +25,7 @@ MAX_WORKERS = int(os.environ.get("PROXYIP_MAX_WORKERS", "24"))
 TIMEOUT = int(os.environ.get("PROXYIP_CHECK_TIMEOUT", "35"))
 MAX_CANDIDATES = int(os.environ.get("PROXYIP_MAX_CANDIDATES", "1400"))
 FAILOVER_THRESHOLD = int(os.environ.get("PROXYIP_FAILOVER_THRESHOLD", "2"))
+FALLBACK_SOURCES: list[dict] = []
 TARGET_COUNTRIES = {x.strip().upper() for x in os.environ.get("PROXYIP_TARGET_COUNTRIES", "US").split(",") if x.strip()}
 PREFERRED_COLOS = [x.strip().upper() for x in os.environ.get("PROXYIP_PREFERRED_COLOS", "IAD").split(",") if x.strip()]
 BEST_COUNT = 20

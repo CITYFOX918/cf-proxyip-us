@@ -48,7 +48,7 @@ def desired_records() -> list[dict]:
             ips.append(ip)
     if len(ips) != 1:
         raise RuntimeError(f"Expected exactly 1 stable current IP, got {len(ips)}: {ips}")
-    return [{"type": "A", "name": RECORD_NAME, "content": ips[0], "ttl": 300, "prox[用户触发屏蔽词]": False}]
+    return [{"type": "A", "name": RECORD_NAME, "content": ips[0], "ttl": 300, "proxied": False}]
 
 
 def same_record(record: dict, desired: dict) -> bool:
