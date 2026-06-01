@@ -32,7 +32,7 @@ def hmac_token() -> str:
     if not secret:
         raise SystemExit("Missing PROXYIP_HMAC_SECRET env var")
     date_str = time.strftime("%Y%m%d", time.gmtime())
-    return hmac.new(secret.encode(), date_str.encode(), hashlib.sha256).hexdigest()
+    return f"{date_str}-{hmac.new(secret.encode(), date_str.encode(), hashlib.sha256).hexdigest()}"
 
 
 def fetch(url: str) -> tuple[int, str]:
