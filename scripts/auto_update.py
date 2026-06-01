@@ -15,6 +15,7 @@ PROXY_DOMAIN = "proxyip.leilaomi.cc.cd"
 
 
 def hmac_token() -> str:
+    """Generate today's HMAC token, matching the Worker's verifyToken()."""
     secret = os.environ.get("PROXYIP_HMAC_SECRET", "")
     if not secret:
         raise SystemExit("Missing PROXYIP_HMAC_SECRET env var")
@@ -77,8 +78,13 @@ def verify_live() -> None:
 
     token = hmac_token()
     expected = [primary]
+<<<<<<< HEAD
     # Wait up to 20 attempts × 10s for current.txt to match
     for attempt in range(1, 21):
+=======
+    # Wait up to 15 attempts × 15s for current.txt to match
+    for attempt in range(1, 16):
+>>>>>>> 1c81d83 (fix: use HMAC token in auto_update.py verify_live())
         status, body = fetch(f"{LIST_DOMAIN}/current.txt?t={token}&r={int(time.time())}")
         if status == 200:
             live = [x.strip() for x in body.splitlines() if x.strip()]
