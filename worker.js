@@ -75,7 +75,7 @@ export default {
             acc[asn] = (acc[asn] || 0) + 1;
             return acc;
           }, {}),
-          colo_distribution: valid.map(v => v.colo).filter(Boolean).reduce((acc, colo) => {
+          colo_distribution: valid.map(v => v.risk?.colo).filter(Boolean).reduce((acc, colo) => {
             acc[colo] = (acc[colo] || 0) + 1;
             return acc;
           }, {}),
@@ -246,7 +246,7 @@ function renderHome(result, url) {
   const freshnessMin = checkedAt !== "unknown" ? Math.round((Date.now() - new Date(checkedAt).getTime()) / 60000) : null;
   const asnSet = new Set(valid.map(i => i.risk?.asn).filter(Boolean));
   const sourceCount = s.source_count || s.sources?.length || 1;
-  const avgLatency = Math.round(valid.reduce((sum, v) => sum + (v.latency_ms ?? 0), 0) / valid.length || null);
+  const avgLatency = valid.length > 0 ? Math.round(valid.reduce((sum, v) => sum + (v.latency_ms ?? 0), 0) / valid.length) : null;
   const rows = valid.slice(0, 30).map((item, i) =>
     `<tr><td>${i + 1}</td><td><code>${escapeHtml(item.ip)}</code></td><td>${escapeHtml(item.portRemote || 443)}</td><td>${escapeHtml(item.colo || "")}</td><td>${escapeHtml(item.latency_ms ?? "")}</td></tr>`
   ).join("");

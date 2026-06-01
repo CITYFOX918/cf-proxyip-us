@@ -14,8 +14,16 @@ from urllib.request import Request, urlopen
 
 LIST_DOMAIN = "https://list.leilaomi.cc.cd"
 PROXY_DOMAIN = "proxyip.leilaomi.cc.cd"
-KV_NAMESPACE_ID = "6d911271a65f4e67a39e22d991edb961"
 TARGET_COUNTRIES = {"US"}
+
+
+def get_kv_namespace_id() -> str:
+    import re
+    text = Path("wrangler.toml").read_text(encoding="utf-8")
+    m = re.search(r'id\s*=\s*"([^"]+)"', text)
+    if not m:
+        raise RuntimeError("Cannot find KV namespace id in wrangler.toml")
+    return m.group(1)
 
 
 def hmac_token() -> str:
@@ -52,7 +60,7 @@ def dns_ips() -> list[str]:
 def kv_get(key: str) -> str:
     return subprocess.check_output([
         "wrangler", "kv", "key", "get", key,
-        "--namespace-id", KV_NAMESPACE_ID,
+        "--namespace-id", get_kv_namespace_id(),
         "--remote",
     ], text=True).strip()
 

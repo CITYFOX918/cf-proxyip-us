@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+import hashlib
+import hmac
 import json
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-TOKEN = time.strftime("%Y%m%d", time.gmtime())
 LIST_DOMAIN = "https://list.leilaomi.cc.cd"
 PROXY_DOMAIN = "proxyip.leilaomi.cc.cd"
+
+
+def hmac_token() -> str:
+    secret = os.environ.get("PROXYIP_HMAC_SECRET", "")
+    if not secret:
+        raise SystemExit("Missing PROXYIP_HMAC_SECRET env var")
+    date_str = time.strftime("%Y%m%d", time.gmtime())
+    return f"{date_str}-{hmac.new(secret.encode(), date_str.encode(), hashlib.sha256).hexdigest()}"
 
 
 def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -65,10 +75,11 @@ def verify_live() -> None:
         print("⚠️  No primary IP, skipping live verification", flush=True)
         return
 
+    token = hmac_token()
     expected = [primary]
     # Wait up to 20 attempts × 10s for current.txt to match
     for attempt in range(1, 21):
-        status, body = fetch(f"{LIST_DOMAIN}/current.txt?t={TOKEN}&r={int(time.time())}")
+        status, body = fetch(f"{LIST_DOMAIN}/current.txt?t={token}&r={int(time.time())}")
         if status == 200:
             live = [x.strip() for x in body.splitlines() if x.strip()]
             if live == expected:
@@ -83,7 +94,7 @@ def verify_live() -> None:
         print("⚠️  Live current.txt verification timed out, DNS will sync in background", flush=True)
 
     # Verify health endpoint
-    status, body = fetch(f"{LIST_DOMAIN}/health?t={TOKEN}&r={int(time.time())}")
+    status, body = fetch(f"{LIST_DOMAIN}/health?t={token}&r={int(time.time())}")
     if status == 200:
         health = json.loads(body)
         print(f"✅ Health: {json.dumps(health)}", flush=True)

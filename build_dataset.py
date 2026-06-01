@@ -109,19 +109,6 @@ def collect_candidates() -> tuple[list[dict], list[dict]]:
             item = by_ip.setdefault(row["ip"], {"ip": row["ip"], "port": row.get("port", 443), "country_hint": row.get("country_hint"), "sources": []})
             item["sources"] = sorted(set(item["sources"]) | set(row.get("sources") or []))
 
-    # 加载备用数据源
-    for src in FALLBACK_SOURCES:
-        try:
-            text = fetch_text(src["url"])
-            rows = parse_candidates(text, src["name"], src.get("countries"), src.get("ports"))
-            source_stats.append({"name": src["name"], "url": src["url"], "count": len(rows), "error": None})
-        except Exception as exc:
-            rows = []
-            source_stats.append({"name": src["name"], "url": src["url"], "count": 0, "error": str(exc)})
-        for row in rows:
-            item = by_ip.setdefault(row["ip"], {"ip": row["ip"], "port": row.get("port", 443), "country_hint": row.get("country_hint"), "sources": []})
-            item["sources"] = sorted(set(item["sources"]) | set(row.get("sources") or []))
-
     for row in read_ip_file(MANUAL_ALLOWLIST, "manual_allowlist"):
         item = by_ip.setdefault(row["ip"], {"ip": row["ip"], "port": row.get("port", 443), "country_hint": row.get("country_hint"), "sources": []})
         item["sources"] = sorted(set(item["sources"]) | {"manual_allowlist"})
@@ -163,23 +150,20 @@ def check_https_direct(ip: str, timeout: int = 8) -> dict:
     
     start = time.monotonic()
     try:
-        # 测试 1: TCP 连接
-        sock = socket.create_connection((ip, 443), timeout=min(timeout, 3))
-        sock.close()
-        tcp_time = int((time.monotonic() - start) * 1000)
-        
-        # 测试 2: HTTPS 请求到 Cloudflare 端点
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         
-        test_url = f"https://{ip}/cdn-cgi/trace"
-        headers = f"Host: speed.cloudflare.com\r\nUser-Agent: curl/8.0.0\r\nAccept: */*\r\n\r\n"
-        
-        req_start = time.monotonic()
         sock = socket.create_connection((ip, 443), timeout=timeout)
         ssock = ctx.wrap_socket(sock, server_hostname="speed.cloudflare.com")
-        ssock.sendall(f"GET /cdn-cgi/trace HTTP/1.1\r\n{headers}".encode())
+        ssock.sendall(
+            b"GET /cdn-cgi/trace HTTP/1.1\r\n"
+            b"Host: speed.cloudflare.com\r\n"
+            b"User-Agent: curl/8.0.0\r\n"
+            b"Accept: */*\r\n"
+            b"Connection: close\r\n"
+            b"\r\n"
+        )
         
         response = b""
         while True:
@@ -187,18 +171,14 @@ def check_https_direct(ip: str, timeout: int = 8) -> dict:
             if not chunk:
                 break
             response += chunk
-            if b"\r\n\r\n" in response:
-                break
         ssock.close()
         
         latency = int((time.monotonic() - start) * 1000)
         resp_text = response.decode("utf-8", errors="ignore")
         
-        # 检查响应是否包含 Cloudflare 特征
         is_cf = "cf-ray" in resp_text.lower() or "cloudflare" in resp_text.lower()
         is_200 = "HTTP/1.1 200" in resp_text or "HTTP/2 200" in resp_text
         
-        # 提取国家信息
         country = None
         for line in resp_text.split("\n"):
             if line.startswith("loc="):
@@ -213,7 +193,7 @@ def check_https_direct(ip: str, timeout: int = 8) -> dict:
                 "latency_ms": latency,
                 "country": country or "US",
                 "colo": None,
-                "cf_bot_score": 95,  # 默认分数
+                "cf_bot_score": 95,
                 "method": "direct_https",
             }
         else:
