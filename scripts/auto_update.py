@@ -8,19 +8,27 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.request import Request, urlopen
-
-LIST_DOMAIN = "https://list.leilaomi.cc.cd"
-PROXY_DOMAIN = "proxyip.leilaomi.cc.cd"
-
+from http.cookiejar import CookieJar
+from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 def hmac_token() -> str:
-    """Generate today's HMAC token, matching the Worker's verifyToken()."""
     secret = os.environ.get("PROXYIP_HMAC_SECRET", "")
-    if not secret:
-        raise SystemExit("Missing PROXYIP_HMAC_SECRET env var")
-    date_str = time.strftime("%Y%m%d", time.gmtime())
-    return f"{date_str}-{hmac.new(secret.encode(), date_str.encode(), hashlib.sha256).hexdigest()}"
+    if secret:
+        date_str = time.strftime("%Y%m%d", time.gmtime())
+        return f"{date_str}-{hmac.new(secret.encode(), date_str.encode(), hashlib.sha256).hexdigest()}"
+
+    jar = CookieJar()
+    opener = build_opener(HTTPCookieProcessor(jar))
+    opener.open(Request(f"{LIST_DOMAIN}/", headers={"User-Agent": "Mozilla/5.0"}), timeout=30).read()
+    with opener.open(Request(f"{LIST_DOMAIN}/token", headers={"User-Agent": "Mozilla/5.0"}), timeout=30) as res:
+        data = json.loads(res.read().decode("utf-8", "ignore"))
+    token = data.get("token")
+    if not token:
+        raise SystemExit("Cannot obtain HMAC token from /token")
+    return token
+
+LIST_DOMAIN = os.environ.get("PROXYIP_LIST_DOMAIN", "https://list.leilaomi.cc.cd").rstrip("/")
+PROXY_DOMAIN = os.environ.get("PROXYIP_RECORD_NAME", "proxyip.leilaomi.cc.cd")
 
 
 def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -78,24 +86,24 @@ def verify_live() -> None:
 
     token = hmac_token()
     expected = [primary]
-    # Wait up to 15 attempts × 15s for current.txt to match
-    for attempt in range(1, 16):
+    # Wait up to 20 attempts × 10s for current.txt to match
+    for attempt in range(1, 21):
         status, body = fetch(f"{LIST_DOMAIN}/current.txt?t={token}&r={int(time.time())}")
         if status == 200:
             live = [x.strip() for x in body.splitlines() if x.strip()]
             if live == expected:
                 print(f"✅ Live current.txt matches: {live}", flush=True)
                 break
-            print(f"  attempt {attempt}/15: got {live}, want {expected}", flush=True)
+            print(f"  attempt {attempt}/20: got {live}, want {expected}", flush=True)
         else:
-            print(f"  attempt {attempt}/15: HTTP {status}", flush=True)
-        if attempt < 15:
-            time.sleep(15)
+            print(f"  attempt {attempt}/20: HTTP {status}", flush=True)
+        if attempt < 20:
+            time.sleep(10)
     else:
         print("⚠️  Live current.txt verification timed out, DNS will sync in background", flush=True)
 
     # Verify health endpoint
-    status, body = fetch(f"{LIST_DOMAIN}/health?t={token}&r={int(time.time())}")
+    status, body = fetch(f"{LIST_DOMAIN}/health/full?t={token}&r={int(time.time())}")
     if status == 200:
         health = json.loads(body)
         print(f"✅ Health: {json.dumps(health)}", flush=True)

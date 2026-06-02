@@ -8,7 +8,6 @@ import json
 import os
 import re
 import time
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -27,6 +26,9 @@ TIMEOUT = int(os.environ.get("PROXYIP_CHECK_TIMEOUT", "35"))
 MAX_CANDIDATES = int(os.environ.get("PROXYIP_MAX_CANDIDATES", "1400"))
 FAILOVER_THRESHOLD = int(os.environ.get("PROXYIP_FAILOVER_THRESHOLD", "2"))
 FALLBACK_SOURCES: list[dict] = []
+CURRENT_MIN_BOT_SCORE = int(os.environ.get("PROXYIP_CURRENT_MIN_BOT_SCORE", "80"))
+CURRENT_MAX_LATENCY_MS = int(os.environ.get("PROXYIP_CURRENT_MAX_LATENCY_MS", "2500"))
+SWITCH_COOLDOWN_HOURS = int(os.environ.get("PROXYIP_SWITCH_COOLDOWN_HOURS", "6"))
 TARGET_COUNTRIES = {x.strip().upper() for x in os.environ.get("PROXYIP_TARGET_COUNTRIES", "US").split(",") if x.strip()}
 PREFERRED_COLOS = [x.strip().upper() for x in os.environ.get("PROXYIP_PREFERRED_COLOS", "IAD").split(",") if x.strip()]
 BEST_COUNT = 20
@@ -110,6 +112,19 @@ def collect_candidates() -> tuple[list[dict], list[dict]]:
             item = by_ip.setdefault(row["ip"], {"ip": row["ip"], "port": row.get("port", 443), "country_hint": row.get("country_hint"), "sources": []})
             item["sources"] = sorted(set(item["sources"]) | set(row.get("sources") or []))
 
+    # 加载备用数据源
+    for src in FALLBACK_SOURCES:
+        try:
+            text = fetch_text(src["url"])
+            rows = parse_candidates(text, src["name"], src.get("countries"), src.get("ports"))
+            source_stats.append({"name": src["name"], "url": src["url"], "count": len(rows), "error": None})
+        except Exception as exc:
+            rows = []
+            source_stats.append({"name": src["name"], "url": src["url"], "count": 0, "error": str(exc)})
+        for row in rows:
+            item = by_ip.setdefault(row["ip"], {"ip": row["ip"], "port": row.get("port", 443), "country_hint": row.get("country_hint"), "sources": []})
+            item["sources"] = sorted(set(item["sources"]) | set(row.get("sources") or []))
+
     for row in read_ip_file(MANUAL_ALLOWLIST, "manual_allowlist"):
         item = by_ip.setdefault(row["ip"], {"ip": row["ip"], "port": row.get("port", 443), "country_hint": row.get("country_hint"), "sources": []})
         item["sources"] = sorted(set(item["sources"]) | {"manual_allowlist"})
@@ -148,13 +163,13 @@ def check_https_direct(ip: str, timeout: int = 8) -> dict:
     """直接 HTTPS 测试 ProxyIP，作为 cmliu API 的备用验证方式"""
     import ssl
     import socket
-    
+
     start = time.monotonic()
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        
+
         sock = socket.create_connection((ip, 443), timeout=timeout)
         ssock = ctx.wrap_socket(sock, server_hostname="speed.cloudflare.com")
         ssock.sendall(
@@ -165,7 +180,7 @@ def check_https_direct(ip: str, timeout: int = 8) -> dict:
             b"Connection: close\r\n"
             b"\r\n"
         )
-        
+
         response = b""
         while True:
             chunk = ssock.recv(4096)
@@ -173,19 +188,21 @@ def check_https_direct(ip: str, timeout: int = 8) -> dict:
                 break
             response += chunk
         ssock.close()
-        
+
         latency = int((time.monotonic() - start) * 1000)
         resp_text = response.decode("utf-8", errors="ignore")
-        
-        is_cf = "cf-ray" in resp_text.lower() or "cloudflare" in resp_text.lower()
-        is_200 = "HTTP/1.1 200" in resp_text or "HTTP/2 200" in resp_text
-        
+        header_text, _, body_text = resp_text.partition("\r\n\r\n")
+        headers_lower = header_text.lower()
+        status_line = header_text.splitlines()[0] if header_text.splitlines() else ""
+        is_cf = "cf-ray:" in headers_lower or "server: cloudflare" in headers_lower
+        is_200 = " 200" in status_line
+
         country = None
-        for line in resp_text.split("\n"):
+        for line in body_text.splitlines():
             if line.startswith("loc="):
-                country = line.split("=")[1].strip()
+                country = line.split("=", 1)[1].strip().upper()
                 break
-        
+
         if is_cf and is_200:
             return {
                 "ip": ip,
@@ -197,12 +214,10 @@ def check_https_direct(ip: str, timeout: int = 8) -> dict:
                 "cf_bot_score": 95,
                 "method": "direct_https",
             }
-        else:
-            return {"ip": ip, "success": False, "error": "not_cloudflare", "latency_ms": latency}
-            
+        return {"ip": ip, "success": False, "error": "not_cloudflare", "latency_ms": latency}
+
     except Exception as exc:
         return {"ip": ip, "success": False, "error": str(exc)[:100], "latency_ms": int((time.monotonic() - start) * 1000)}
-
 
 def check_with_fallback(ip: str) -> dict:
     """先用 cmliu API，失败则用直接 HTTPS 测试"""
@@ -222,7 +237,20 @@ def check_with_fallback(ip: str) -> dict:
 
 
 def exit_info(item: dict) -> dict:
-    return (((item.get("probe_results") or {}).get("ipv4") or {}).get("exit") or {})
+    ex = (((item.get("probe_results") or {}).get("ipv4") or {}).get("exit") or {})
+    if ex:
+        return ex
+    if item.get("method") == "direct_https":
+        return {
+            "country": item.get("country"),
+            "colo": item.get("colo"),
+            "botManagement": {
+                "score": item.get("cf_bot_score", 95),
+                "corporateProxy": False,
+                "verifiedBot": False,
+            },
+        }
+    return {}
 
 
 def enrich(item: dict, source_meta: dict | None = None) -> dict:
@@ -281,6 +309,30 @@ def preferred_colo_rank(item: dict) -> int:
     except ValueError:
         return len(PREFERRED_COLOS)
 
+def current_quality_ok(item: dict) -> bool:
+    risk = item.get("risk") or {}
+    score = risk.get("cf_bot_score")
+    latency = item.get("latency_ms") if isinstance(item.get("latency_ms"), int) else 999999
+    if score is not None and int(score) < CURRENT_MIN_BOT_SCORE:
+        return False
+    if risk.get("corporate_proxy") or risk.get("verified_bot"):
+        return False
+    if latency > CURRENT_MAX_LATENCY_MS:
+        return False
+    return is_target_region(item)
+
+
+def in_switch_cooldown(previous_state: dict, now_ts: datetime) -> bool:
+    ts = previous_state.get("last_switch_at") or previous_state.get("first_selected_at")
+    if not ts:
+        return False
+    try:
+        last = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (now_ts - last).total_seconds() < SWITCH_COOLDOWN_HOURS * 3600
+
+
 def stable_score(item: dict) -> int:
     risk = item.get("risk") or {}
     score = risk.get("cf_bot_score") or 0
@@ -327,22 +379,28 @@ def select_current(valid: list[dict], all_results: list[dict]) -> tuple[dict, di
     checked_by_ip = {x.get("ip"): x for x in all_results}
     best = sorted(valid, key=rank_key)
     best_item = best[0] if best else None
-    now = now_iso()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
 
     if previous_ip and previous_ip in valid_by_ip:
         current_item = valid_by_ip[previous_ip]
-        state = {
-            **previous_state,
-            "current_ip": previous_ip,
-            "status": "healthy",
-            "failure_count": 0,
-            "last_success_at": now,
-            "last_checked_at": now,
-            "last_error": None,
-            "failover_threshold": FAILOVER_THRESHOLD,
-        }
-        current_item["selection_reason"] = "kept_current_ip_still_healthy"
-        return current_item, state, history
+        quality_ok = current_quality_ok(current_item)
+        cooldown = in_switch_cooldown(previous_state, now_dt)
+        if quality_ok or cooldown:
+            state = {
+                **previous_state,
+                "current_ip": previous_ip,
+                "status": "healthy" if quality_ok else "degraded_quality_cooldown",
+                "failure_count": 0,
+                "last_success_at": now,
+                "last_checked_at": now,
+                "last_error": None if quality_ok else "current ip below quality threshold but inside switch cooldown",
+                "failover_threshold": FAILOVER_THRESHOLD,
+                "quality_threshold": {"min_bot_score": CURRENT_MIN_BOT_SCORE, "max_latency_ms": CURRENT_MAX_LATENCY_MS},
+                "switch_cooldown_hours": SWITCH_COOLDOWN_HOURS,
+            }
+            current_item["selection_reason"] = "kept_current_ip_still_healthy" if quality_ok else "kept_current_ip_quality_cooldown"
+            return current_item, state, history
 
     failure_count = int(previous_state.get("failure_count") or 0) + (1 if previous_ip else 0)
     if previous_ip and failure_count < FAILOVER_THRESHOLD:
@@ -376,6 +434,7 @@ def select_current(valid: list[dict], all_results: list[dict]) -> tuple[dict, di
         "status": "healthy",
         "failure_count": 0,
         "first_selected_at": previous_state.get("first_selected_at") if previous_state.get("current_ip") == new_ip else now,
+        "last_switch_at": previous_state.get("last_switch_at") if previous_ip == new_ip else now,
         "last_success_at": now,
         "last_checked_at": now,
         "last_error": None,
@@ -427,16 +486,19 @@ def write_outputs(out: dict, current: dict, state: dict, history: list[dict]) ->
     top5 = [x["ip"] for x in ([current] + standby)[:5] if x.get("ip")]
 
     (DOCS / "all.txt").write_text("\n".join(ips) + ("\n" if ips else ""), encoding="utf-8")
-    shutil.copy(DOCS / "all.txt", DOCS / "us.txt")
+    (DOCS / "us.txt").write_text("\n".join(ips) + ("\n" if ips else ""), encoding="utf-8")
     (DOCS / "best.txt").write_text("\n".join(ips[:BEST_COUNT]) + ("\n" if ips else ""), encoding="utf-8")
     (DOCS / "standby.txt").write_text("\n".join(x["ip"] for x in standby) + ("\n" if standby else ""), encoding="utf-8")
     (DOCS / "top5.txt").write_text("\n".join(top5) + ("\n" if top5 else ""), encoding="utf-8")
     (DOCS / "current.txt").write_text(current["ip"] + "\n", encoding="utf-8")
-    (DOCS / "v2ray.txt").write_text(base64.b64encode("\n".join(ips).encode()).decode(), encoding="utf-8")
+    base64_body = base64.b64encode("\n".join(ips).encode()).decode()
+    (DOCS / "base64.txt").write_text(base64_body, encoding="utf-8")
+    (DOCS / "v2ray.txt").write_text(base64_body, encoding="utf-8")
     (DOCS / "current.json").write_text(json.dumps({"current": slim_item(current), "state": state}, ensure_ascii=False, indent=2), encoding="utf-8")
     (DOCS / "state.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     (DOCS / "history.json").write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
-    (DOCS / "full.json").write_text(json.dumps({**out, "current": current, "standby": standby, "state": state, "history": history}, ensure_ascii=False, indent=2), encoding="utf-8")
+    public_out = {k: v for k, v in out.items() if k != "all_results"}
+    (DOCS / "full.json").write_text(json.dumps({**public_out, "current": current, "standby": standby, "state": state, "history": history}, ensure_ascii=False, indent=2), encoding="utf-8")
     (DOCS / "dns-records.json").write_text(json.dumps([{
         "type": "A",
         "name": "proxyip",

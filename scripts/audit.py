@@ -10,30 +10,31 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.request import Request, urlopen
+from http.cookiejar import CookieJar
+from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
-LIST_DOMAIN = "https://list.leilaomi.cc.cd"
-PROXY_DOMAIN = "proxyip.leilaomi.cc.cd"
+LIST_DOMAIN = os.environ.get("PROXYIP_LIST_DOMAIN", "https://list.leilaomi.cc.cd").rstrip("/")
+PROXY_DOMAIN = os.environ.get("PROXYIP_RECORD_NAME", "proxyip.leilaomi.cc.cd")
+KV_NAMESPACE_ID = "6d911271a65f4e67a39e22d991edb961"
 TARGET_COUNTRIES = {"US"}
 
 
-def get_kv_namespace_id() -> str:
-    import re
-    text = Path("wrangler.toml").read_text(encoding="utf-8")
-    m = re.search(r'id\s*=\s*"([^"]+)"', text)
-    if not m:
-        raise RuntimeError("Cannot find KV namespace id in wrangler.toml")
-    return m.group(1)
-
-
 def hmac_token() -> str:
-    """Generate today's HMAC token, matching the Worker's verifyToken()."""
+    """Generate or fetch today's HMAC token, matching the Worker's verifier."""
     secret = os.environ.get("PROXYIP_HMAC_SECRET", "")
-    if not secret:
-        raise SystemExit("Missing PROXYIP_HMAC_SECRET env var")
-    date_str = time.strftime("%Y%m%d", time.gmtime())
-    return f"{date_str}-{hmac.new(secret.encode(), date_str.encode(), hashlib.sha256).hexdigest()}"
+    if secret:
+        date_str = time.strftime("%Y%m%d", time.gmtime())
+        return f"{date_str}-{hmac.new(secret.encode(), date_str.encode(), hashlib.sha256).hexdigest()}"
 
+    jar = CookieJar()
+    opener = build_opener(HTTPCookieProcessor(jar))
+    opener.open(Request(f"{LIST_DOMAIN}/", headers={"User-Agent": "Mozilla/5.0 ProxyIPAudit"}), timeout=30).read()
+    with opener.open(Request(f"{LIST_DOMAIN}/token", headers={"User-Agent": "Mozilla/5.0 ProxyIPAudit"}), timeout=30) as res:
+        data = json.loads(res.read().decode("utf-8", "ignore"))
+    token = data.get("token")
+    if not token:
+        raise SystemExit("Cannot obtain HMAC token from /token")
+    return token
 
 def fetch(url: str) -> tuple[int, str]:
     req = Request(url, headers={"User-Agent": "Mozilla/5.0 ProxyIPAudit"})
@@ -60,7 +61,7 @@ def dns_ips() -> list[str]:
 def kv_get(key: str) -> str:
     return subprocess.check_output([
         "wrangler", "kv", "key", "get", key,
-        "--namespace-id", get_kv_namespace_id(),
+        "--namespace-id", KV_NAMESPACE_ID,
         "--remote",
     ], text=True).strip()
 
@@ -95,7 +96,7 @@ def main() -> None:
     status, body = fetch(f"{LIST_DOMAIN}/current.txt?t={token}&r={int(time.time())}")
     assert_true(status == 200 and body.strip() == current, f"live current.txt mismatch: {status} {body[:120]}")
 
-    status, body = fetch(f"{LIST_DOMAIN}/health?t={token}&r={int(time.time())}")
+    status, body = fetch(f"{LIST_DOMAIN}/health/full?t={token}&r={int(time.time())}")
     assert_true(status == 200, f"live health failed: {status} {body[:120]}")
     health = json.loads(body)
     assert_true(health.get("current") == current, "live health current mismatch")

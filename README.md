@@ -46,32 +46,35 @@ Token 格式：`YYYYMMDD-HMAC-SHA256-Hex`，每天自動更新。
 
 ## 當前實際數據
 
-- 來源：5 個數據源（zip.cm.edu.kg、090227、xiaoji、Alvin9999）
-- 過濾：只取 `#US`、只取 IPv4、只取 `:443`
-- cmliu 條件：`success=true` 且 `supports_ipv4=true`
-- 候選數：550
-- 通過 IPv4 檢測：191
-- cmliu 成功但不是 IPv4：352（已排除）
-- 低風險 Top 5：`43.170.25.96`, `216.180.125.171`, `159.60.146.81`, `156.154.245.83`, `198.23.224.230`
-- 排名規則：Cloudflare bot score 高、`corporateProxy=false`、`verifiedBot=false`、延遲低；Top 5 保持 ASN 分散
-- 檢測接口：`https://api.090227.xyz/check`
-- 最近生成時間：`2026-05-31T19:43:25.799764+00:00`
-- 數據來源：KV 存儲（不再內嵌到 Worker）
+當前數據以線上 `/health`、`docs/current.txt`、`docs/full.json` 為準。候選數、有效 IP 數、延遲與 Top 5 會隨每次自動巡檢變化，README 不再寫死動態數字。
+
+快速查看：
+
+```bash
+curl https://list.leilaomi.cc.cd/health
+cat docs/current.txt
+python3 - <<'PY'
+import json
+from pathlib import Path
+full = json.loads(Path("docs/full.json").read_text())
+print(full["summary"])
+PY
+```
 
 輸出文件在 `docs/`：
 
-- `file docs/current.txt`：1 個當前穩定主 IP，用於 `proxyip.leilaomi.cc.cd` DNS-only 單 A 記錄
-- `file docs/current.json`：當前主 IP 詳情與狀態
-- `file docs/state.json`：failover 狀態、連續失敗次數、最近成功時間
-- `file docs/history.json`：切換歷史
-- `file docs/standby.txt`：備用候選池
-- `file docs/top5.txt`：當前主 IP + 前 4 個備用候選
-- `file docs/all.txt`：207 個通過 IPv4 檢測的 IP
-- `file docs/us.txt`：同 `file all.txt`
-- `file docs/best.txt`：前 20 個
-- `file docs/dns-records.json`：Cloudflare DNS A 記錄快照
-- `file docs/full.json`：檢測報告
-- `file docs/v2ray.txt`：Base64 編碼列表
+- `docs/current.txt`：1 個當前穩定主 IP，用於 `proxyip.leilaomi.cc.cd` DNS-only 單 A 記錄
+- `docs/current.json`：當前主 IP 詳情與狀態
+- `docs/state.json`：failover 狀態、連續失敗次數、最近成功時間
+- `docs/history.json`：切換歷史
+- `docs/standby.txt`：備用候選池
+- `docs/top5.txt`：當前主 IP + 前 4 個備用候選
+- `docs/all.txt`：通過 IPv4 與目標地區檢測的 IP
+- `docs/us.txt`：目前等同 `docs/all.txt`
+- `docs/best.txt`：前 20 個
+- `docs/dns-records.json`：Cloudflare DNS A 記錄快照
+- `docs/full.json`：公開檢測報告（不包含完整 debug `all_results`）
+- `docs/v2ray.txt`：Base64 編碼的純 IP 列表；不是完整 V2Ray/VLESS 節點訂閱
 
 ## Cloudflare 部署
 
@@ -87,16 +90,20 @@ Token 格式：`YYYYMMDD-HMAC-SHA256-Hex`，每天自動更新。
 
 Worker 做了基礎防護，目標是降低公開列表被爬取和被濫用的風險：
 
-- `robots.txt` 禁止抓取；
+- Worker 代碼提供 `robots.txt` 禁止抓取；若 Cloudflare 啟用了 managed robots / AI Content Signals，線上 `/robots.txt` 可能由 Cloudflare 接管；
 - 所有響應加 `X-Robots-Tag: noindex,nofollow,noarchive`；
 - 常見 bot / crawler / curl / wget / python-requests / 掃描器 UA 直接 403；
-- 文本與 JSON 接口需要認證（Cookie 或 HMAC Token）；
+- 文本與 JSON 數據接口需要認證（Cookie 或 HMAC Token）；公開 `/health` 只返回最小健康信息，詳細 `/health/full` 與 `/stats` 需要認證；
 - 接口使用 `private, max-age=300`，避免被公共緩存長期保存；
 - 支援 ETag/304 緩存，減少不必要的數據傳輸。
 
 安全性：HMAC-SHA256 簽名，密鑰存儲在 Cloudflare Worker Secrets 中。
 
 這不是強安全認證；如果要更嚴格，下一步應改為固定私密 token 或 Cloudflare Access。
+
+Rate Limiting：接口使用 `private, max-age=300`，避免被公共緩存長期保存；支援 ETag/304 緩存，減少不必要的數據傳輸。
+
+安全 Headers：所有響應加 `X-Robots-Tag: noindex,nofollow,noarchive`；常見 bot / crawler / curl / wget / python-requests / 掃描器 UA 直接 403。
 
 ## 重新生成數據
 
@@ -110,12 +117,12 @@ python3 build_dataset.py
 2. 只保留 `#US`、IPv4、`:443`
 3. 調用 `https://api.090227.xyz/check?proxyip=<ip>` 驗證
 4. 只保留 `success=true` 且 `supports_ipv4=true`
-5. 重寫 `result.json` 和 `docs/`
+5. 重寫 `file result.json` 和 `docs/`
 
-重新生成後，運行完整的自動巡檢流程（同步 KV + DNS + 部署 Worker）：
+重新生成後，需把精簡後的 `file docs/full.json` 內嵌到 `file worker.js`，更新 Cloudflare DNS A 記錄，再部署：
 
 ```bash
-python3 scripts/auto_update.py
+wrangler deploy
 ```
 
 ## 自動巡檢與自癒
@@ -152,7 +159,9 @@ python3 scripts/auto_update.py
 | Secret | 用途 |
 |--------|------|
 | `CLOUDFLARE_API_TOKEN` | Cloudflare API 權限（DNS + Workers） |
-| `PROXYIP_HMAC_SECRET` | HMAC Token 簽名密鑰 |
+| `PROXYIP_HMAC_SECRET` | GitHub Actions 用於生成 HMAC Token |
+
+Cloudflare Worker 端還需要設置 Worker Secret：`PROXYIP_SECRET`。它的值必須與 GitHub repo secret `PROXYIP_HMAC_SECRET` 相同。
 
 ## GitHub Pages
 
@@ -168,28 +177,17 @@ GitHub Pages 已關閉；實際發布為 `proxyip.leilaomi.cc.cd` 的 DNS-only A
 - 當前 IP 健康且仍符合目標地區時不切換，避免 AI / CF CDN 站點看到出口亂跳；
 - 如需改成其他單一地區，調整 GitHub Actions/環境變量中的 `PROXYIP_TARGET_COUNTRIES` 和 `PROXYIP_PREFERRED_COLOS` 後重新跑 `scripts/auto_update.py`。
 
-## 更新日誌
 
-### 2026-06-01 — 全面修復與代碼審查
-
-**Bug 修復（7 項）：**
-
-| 文件 | 問題 | 修復 |
-|------|------|------|
-| `.github/workflows/proxyip-auto-update.yml` | `setup-node` 配置了 `cache: "npm"` 但項目無 `package-lock.json`，Actions 直接報錯 | 移除 `cache: "npm"` |
-| `build_dataset.py` | 引用 `FALLBACK_SOURCES` 但從未定義，運行時 `NameError` 必崩 | 添加 `FALLBACK_SOURCES: list[dict] = []` |
-| `scripts/sync_dns.py` | `"proxied"` 字典鍵名被截斷成亂碼，DNS 同步必崩 | 恢復為 `"proxied": False` |
-| `worker.js` | 首頁平均延遲：空數據時 `Math.round(null)` 顯示 "0" 而非 "N/A" | 改為 `valid.length > 0 ? ... : null` |
-| `worker.js` | `/stats` 的 `colo_distribution` 使用 `v.colo`（永遠為 `undefined`） | 改為 `v.risk?.colo` |
-| `scripts/auto_update.py` | `verify_live()` 使用純日期 token 訪問數據接口，被 Worker 的 HMAC 認證拒絕（403） | 改用 HMAC token 生成 |
-| `build_dataset.py` | `check_https_direct()` 有未使用變量 `test_url`、`tcp_time`、`req_start`，且缺少 `Connection: close` 頭 | 清理變量，添加 `Connection: close` |
-
-**設計改進（5 項）：**
+### 2026-06-02 — 穩定性與線上核查後改進
 
 | 文件 | 改進 |
 |------|------|
-| `.gitignore` | 添加 `result.json`（臨時文件，不應提交） |
-| `scripts/sync_kv.py` | KV namespace ID 改為從 `wrangler.toml` 動態讀取，不再硬編碼 |
-| `scripts/audit.py` | 同上，KV namespace ID 改為動態讀取 |
-| `build_dataset.py` | 移除空的 `FALLBACK_SOURCES` 循環（死代碼） |
-| `build_dataset.py` | `us.txt` 改為 `shutil.copy` 自 `all.txt`，消除冗餘寫入（`TARGET_COUNTRIES=US` 時兩者永遠相同） |
+| `build_dataset.py` | 修復直接 HTTPS fallback 結果與 `enrich()` 字段不兼容的問題 |
+| `build_dataset.py` | 增加當前主 IP 最低質量門檻與切換冷卻時間 |
+| `build_dataset.py` | `docs/full.json` 不再提交完整 `all_results` debug 數據，降低倉庫體積 |
+| `worker.js` | `/health` 改為最小公開信息，新增需認證的 `/health/full` |
+| `worker.js` | `/stats` 改為需 Cookie/HMAC Token 認證 |
+| `worker.js` | 增加數據新鮮度 stale 判斷、HEAD 支持、304 安全 headers、CSP、Permissions-Policy |
+| `worker.js` | Rate limiter 增加過期 bucket 清理 |
+| `scripts/*.py` | 域名與 zone 支援環境變量覆蓋 |
+| `README.md` | 移除易過期的動態數字，明確 GitHub Secret 與 Worker Secret 的關係 |

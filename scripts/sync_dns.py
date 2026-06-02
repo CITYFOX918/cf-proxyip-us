@@ -7,8 +7,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 API = "https://api.cloudflare.com/client/v4"
-ZONE_NAME = "leilaomi.cc.cd"
-RECORD_NAME = "proxyip.leilaomi.cc.cd"
+ZONE_NAME = os.environ.get("PROXYIP_ZONE_NAME", "leilaomi.cc.cd")
+RECORD_NAME = os.environ.get("PROXYIP_RECORD_NAME", "proxyip.leilaomi.cc.cd")
 DOCS_DNS = Path("docs/dns-records.json")
 
 

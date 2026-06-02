@@ -11,6 +11,11 @@ const EMPTY_RESULT = {
 const ACCESS_COOKIE = "proxyip_access";
 const ACCESS_VALUE = "ok";
 const ACCESS_TTL = 60 * 60 * 8;
+const STALE_WARN_MS = 6 * 60 * 60 * 1000;
+const STALE_FAIL_MS = 12 * 60 * 60 * 1000;
+const RATE_CLEANUP_EVERY = 100;
+const RATE_MAX_BUCKETS = 5000;
+let rateRequestCount = 0;
 
 // ── Rate limiter (per-isolate, best-effort) ──
 const RATE_WINDOW_MS = 60_000;  // 1 minute window
@@ -20,6 +25,10 @@ const rateBuckets = new Map();  // ip -> { count, windowStart }
 function checkRateLimit(request) {
   const ip = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
   const now = Date.now();
+  rateRequestCount++;
+  if (rateRequestCount % RATE_CLEANUP_EVERY === 0 || rateBuckets.size > RATE_MAX_BUCKETS) {
+    cleanupRateBuckets(now);
+  }
   let bucket = rateBuckets.get(ip);
   if (!bucket || now - bucket.windowStart > RATE_WINDOW_MS) {
     bucket = { count: 0, windowStart: now };
@@ -32,43 +41,78 @@ function checkRateLimit(request) {
   return { ok: true, ip, remaining: RATE_MAX_REQUESTS - bucket.count };
 }
 
-const TEXT_PATHS = new Set(["/current.txt", "/standby.txt", "/all.txt", "/us.txt", "/best.txt", "/top5.txt", "/v2ray.txt"]);
+function cleanupRateBuckets(now = Date.now()) {
+  for (const [ip, bucket] of rateBuckets) {
+    if (now - bucket.windowStart > RATE_WINDOW_MS * 2) rateBuckets.delete(ip);
+  }
+  if (rateBuckets.size <= RATE_MAX_BUCKETS) return;
+  for (const ip of rateBuckets.keys()) {
+    rateBuckets.delete(ip);
+    if (rateBuckets.size <= RATE_MAX_BUCKETS) break;
+  }
+}
+
+const TEXT_PATHS = new Set(["/current.txt", "/standby.txt", "/all.txt", "/us.txt", "/best.txt", "/top5.txt", "/v2ray.txt", "/base64.txt"]);
 const JSON_PATHS = new Set(["/current.json", "/state.json", "/history.json", "/full.json"]);
 const BLOCKED_UA = /(bot|spider|crawler|scrapy|python-requests|aiohttp|curl|wget|go-http-client|httpx|masscan|zgrab|nuclei|semrush|ahrefs|bytespider|petalbot|yandex|bingbot|googlebot)/i;
 
 export default {
   async fetch(request, env) {
+    const isHead = request.method === "HEAD";
+    const reply = (resp) => isHead ? new Response(null, { status: resp.status, statusText: resp.statusText, headers: resp.headers }) : resp;
+
     // Rate limit check
     const rl = checkRateLimit(request);
     if (!rl.ok) {
-      return new Response("Rate limit exceeded\n", { status: 429, headers: { "retry-after": "60", "content-type": "text/plain" } });
+      return reply(withHeaders(new Response("Rate limit exceeded\n", { status: 429, headers: { "retry-after": "60", "content-type": "text/plain" } }), true));
     }
 
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") return withHeaders(new Response(null, { status: 204 }));
-    if (request.method !== "GET") return withHeaders(new Response("Method not allowed", { status: 405 }));
-    if (url.pathname === "/robots.txt") return text("User-agent: *\nDisallow: /\n", false);
+    if (request.method !== "GET" && request.method !== "HEAD") return withHeaders(new Response("Method not allowed", { status: 405 }));
+    if (url.pathname === "/robots.txt") return reply(text("User-agent: *\nDisallow: /\n", false));
 
-    // /health is unauthenticated
+    // /health is a minimal public health check. Detailed health requires auth.
     if (url.pathname === "/health") {
       const result = await loadResult(env);
       const valid = Array.isArray(result.valid_ips) ? result.valid_ips : [];
-      return json({
-        ok: true,
+      const freshness = freshnessStatus(result.summary?.checked_at || null);
+      return reply(json({
+        ok: freshness.ok,
+        stale: freshness.stale,
+        age_minutes: freshness.ageMinutes,
+        count: valid.length,
+        checked_at: result.summary?.checked_at || null,
+        data_source: env.PROXYIP_KV ? "kv" : "empty_fallback",
+      }, true));
+    }
+
+    if (url.pathname === "/health/full") {
+      const authErr = await verifyAccess(request, url, env);
+      if (authErr) return reply(deny(authErr));
+      const result = await loadResult(env);
+      const valid = Array.isArray(result.valid_ips) ? result.valid_ips : [];
+      const freshness = freshnessStatus(result.summary?.checked_at || null);
+      return reply(json({
+        ok: freshness.ok,
+        stale: freshness.stale,
+        age_minutes: freshness.ageMinutes,
         current: currentIp(result),
         standby_count: standby(result).length,
         count: valid.length,
         checked_at: result.summary?.checked_at || null,
         data_source: env.PROXYIP_KV ? "kv" : "empty_fallback",
-      }, true);
+      }, true));
     }
 
-    // /stats returns detailed statistics (unauthenticated)
+    // /stats returns detailed statistics (authenticated)
     if (url.pathname === "/stats") {
+      const authErr = await verifyAccess(request, url, env);
+      if (authErr) return reply(deny(authErr));
       const result = await loadResult(env);
       const valid = Array.isArray(result.valid_ips) ? result.valid_ips : [];
-      return json({
+      return reply(json({
         ok: true,
         data: {
           asn_distribution: valid.map(v => v.risk?.asn).filter(Boolean).reduce((acc, asn) => {
@@ -83,26 +127,26 @@ export default {
           avg_latency: valid.reduce((sum, v) => sum + (v.latency_ms ?? 0), 0) / valid.length || null,
           latency_distribution: valid.map(v => v.latency_ms ?? null).filter(v => v !== null),
         },
-      }, true);
+      }, true));
     }
 
     // /token returns the HMAC token for programmatic access (cookie-authenticated)
     if (url.pathname === "/token") {
       const authErr = await verifyAccess(request, url, env);
-      if (authErr) return deny(authErr);
+      if (authErr) return reply(deny(authErr));
       const secret = env.PROXYIP_SECRET || "";
       const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
       if (secret) {
         const hex = await hmacHex(secret, today);
-        return json({ token: `${today}-${hex}`, date: today, mode: "hmac" }, false);
+        return reply(json({ token: `${today}-${hex}`, date: today, mode: "hmac" }, false));
       }
-      return json({ token: today, date: today, mode: "legacy" }, false);
+      return reply(json({ token: today, date: today, mode: "legacy" }, false));
     }
 
     // Auth gate for data endpoints
     if (TEXT_PATHS.has(url.pathname) || JSON_PATHS.has(url.pathname)) {
       const authErr = await verifyAccess(request, url, env);
-      if (authErr) return deny(authErr);
+      if (authErr) return reply(deny(authErr));
     }
 
     const result = await loadResult(env);
@@ -112,7 +156,7 @@ export default {
 
     // 304 Not Modified
     if (request.headers.get("if-none-match") === etag) {
-      return new Response(null, { status: 304 });
+      return reply(withHeaders(new Response(null, { status: 304, headers: { etag } }), true));
     }
 
     const withEtag = (resp) => {
@@ -121,21 +165,21 @@ export default {
       return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
     };
 
-    if (url.pathname === "/current.txt") return withEtag(text(lines(currentIp(result) ? [currentIp(result)] : []), true));
-    if (url.pathname === "/standby.txt") return withEtag(text(lines(standby(result).map((item) => item.ip).filter(Boolean)), true));
-    if (url.pathname === "/all.txt" || url.pathname === "/us.txt") return withEtag(text(lines(ips), true));
+    if (url.pathname === "/current.txt") return reply(withEtag(text(lines(currentIp(result) ? [currentIp(result)] : []), true)));
+    if (url.pathname === "/standby.txt") return reply(withEtag(text(lines(standby(result).map((item) => item.ip).filter(Boolean)), true)));
+    if (url.pathname === "/all.txt" || url.pathname === "/us.txt") return reply(withEtag(text(lines(ips), true)));
     if (url.pathname === "/best.txt") {
       const n = Math.min(Math.max(Number.parseInt(url.searchParams.get("n") || "20", 10) || 20, 1), 100);
-      return withEtag(text(lines(ips.slice(0, n)), true));
+      return reply(withEtag(text(lines(ips.slice(0, n)), true)));
     }
-    if (url.pathname === "/top5.txt") return withEtag(text(lines(top5(result)), true));
-    if (url.pathname === "/v2ray.txt") return withEtag(text(btoa(ips.join("\n")), true));
-    if (url.pathname === "/current.json") return withEtag(json({ current: result.current || null, state: result.state || null }, true));
-    if (url.pathname === "/state.json") return withEtag(json(result.state || {}, true));
-    if (url.pathname === "/history.json") return withEtag(json(result.history || [], true));
-    if (url.pathname === "/full.json") return withEtag(json(result, true));
+    if (url.pathname === "/top5.txt") return reply(withEtag(text(lines(top5(result)), true)));
+    if (url.pathname === "/v2ray.txt" || url.pathname === "/base64.txt") return reply(withEtag(text(btoa(ips.join("\n")), true)));
+    if (url.pathname === "/current.json") return reply(withEtag(json({ current: result.current || null, state: result.state || null }, true)));
+    if (url.pathname === "/state.json") return reply(withEtag(json(result.state || {}, true)));
+    if (url.pathname === "/history.json") return reply(withEtag(json(result.history || [], true)));
+    if (url.pathname === "/full.json") return reply(withEtag(json(result, true)));
 
-    return html(renderHome(result, url));
+    return reply(html(renderHome(result, url)));
   }
 };
 
@@ -204,6 +248,17 @@ function currentIp(result) { return result.current?.ip || result.state?.current_
 function standby(result) { return Array.isArray(result.standby) ? result.standby : []; }
 function top5(result) { return (Array.isArray(result.recommended_top5) ? result.recommended_top5 : []).map((i) => i.ip).filter(Boolean); }
 function lines(items) { return items.join("\n") + (items.length ? "\n" : ""); }
+function freshnessStatus(checkedAt) {
+  if (!checkedAt) return { ok: false, stale: true, ageMinutes: null };
+  const ts = new Date(checkedAt).getTime();
+  if (!Number.isFinite(ts)) return { ok: false, stale: true, ageMinutes: null };
+  const ageMs = Date.now() - ts;
+  return {
+    ok: ageMs <= STALE_FAIL_MS,
+    stale: ageMs > STALE_WARN_MS,
+    ageMinutes: Math.max(0, Math.round(ageMs / 60000)),
+  };
+}
 
 // ── Response builders ──
 
@@ -228,6 +283,8 @@ function withHeaders(response, privateCache = false) {
   headers.set("referrer-policy", "no-referrer");
   headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
   headers.set("x-frame-options", "DENY");
+  headers.set("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+  headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 function escapeHtml(value) {
@@ -313,12 +370,12 @@ th{font-weight:600;background:#f9fafb}
   <li><a href="/all.txt">all.txt</a></li>
   <li><a href="/us.txt">us.txt</a></li>
   <li><a href="/best.txt">best.txt</a></li>
-  <li><a href="/v2ray.txt">v2ray.txt</a></li>
+  <li><a href="/base64.txt">base64.txt</a></li>
   <li><a href="/history.json">history.json</a></li>
   <li><a href="/full.json">full.json</a></li>
   <li><a href="/token">🔑 /token</a></li>
   <li><a href="/health">💚 /health</a></li>
-  <li><a href="/stats">📊 /stats</a></li>
+  <li><a href="/stats">📊 /stats（需 Cookie/Token）</a></li>
 </ul>
 
 <h2>API Token</h2>
