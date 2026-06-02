@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,11 +15,37 @@ from urllib.request import Request, urlopen
 
 SOURCES = [
     {"name": "zip.cm.edu.kg/all.txt", "url": "https://zip.cm.edu.kg/all.txt", "countries": {"US"}, "ports": {443}},
-    {"name": "addressesapi.090227", "url": "https://addressesapi.090227.xyz/ip.txt", "countries": None, "ports": {443}},
-    {"name": "090227-CloudFlareYes", "url": "https://addressesapi.090227.xyz/CloudFlareYes", "countries": None, "ports": {443}},
-    {"name": "xiaoji-cf_cdn_ip", "url": "https://raw.githubusercontent.com/xiaoji235/airport-free/main/airport/cf_cdn_ip.txt", "countries": None, "ports": {443}},
-    {"name": "Alvin9999-cloudflare", "url": "https://raw.githubusercontent.com/Alvin9999/new-pac/master/cloudflare-ip.txt", "countries": None, "ports": {443}},
 ]
+
+PROXYIP_DOMAIN_SOURCES = [
+    {
+        "name": "cmliussss-region-proxyip",
+        "domains": [
+            "ProxyIP.US.CMLiussss.net",
+            "ProxyIP.SG.CMLiussss.net",
+            "ProxyIP.JP.CMLiussss.net",
+            "ProxyIP.HK.CMLiussss.net",
+            "ProxyIP.KR.CMLiussss.net",
+            "ProxyIP.DE.CMLiussss.net",
+            "ProxyIP.SE.CMLiussss.net",
+            "ProxyIP.NL.CMLiussss.net",
+            "ProxyIP.FI.CMLiussss.net",
+            "ProxyIP.GB.CMLiussss.net",
+        ],
+    },
+    {
+        "name": "community-proxyip-domains",
+        "domains": [
+            "edgetunnel.anycast.eu.org",
+            "ts.hpc.tw",
+            "cdn.xn--b6gac.eu.org",
+            "cdn-all.xn--b6gac.eu.org",
+            "bestproxy.onecf.eu.org",
+        ],
+    },
+]
+
+CLOUDFLARE_IPS_V4_URL = "https://www.cloudflare.com/ips-v4"
 CHECK_API = "https://api.090227.xyz/check"
 USER_AGENT = "cf-proxyip-stable-builder/2.0"
 MAX_WORKERS = int(os.environ.get("PROXYIP_MAX_WORKERS", "24"))
@@ -63,10 +90,37 @@ def fetch_text(url: str, retries: int = 3) -> str:
 
 def valid_ipv4(ip: str) -> bool:
     try:
-        ipaddress.IPv4Address(ip)
-        return True
+        addr = ipaddress.IPv4Address(ip)
+        return addr.is_global
     except ValueError:
         return False
+
+
+def load_cloudflare_ipv4_networks() -> list[ipaddress.IPv4Network]:
+    try:
+        text = fetch_text(CLOUDFLARE_IPS_V4_URL, retries=2)
+        return [ipaddress.IPv4Network(line.strip()) for line in text.splitlines() if line.strip()]
+    except Exception as exc:
+        print(f"warning: failed to load Cloudflare IPv4 ranges: {exc}")
+        return []
+
+
+def is_cloudflare_official_ip(ip: str, networks: list[ipaddress.IPv4Network]) -> bool:
+    if not networks:
+        return False
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in networks)
+
+
+def resolve_domain(domain: str) -> list[str]:
+    try:
+        rows = socket.getaddrinfo(domain, 443, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return []
+    return sorted({row[4][0] for row in rows if valid_ipv4(row[4][0])})
 
 
 def parse_candidates(text: str, source_name: str, countries: set[str] | None = None, ports: set[int] | None = None) -> list[dict]:
@@ -97,48 +151,96 @@ def read_ip_file(path: Path, source_name: str) -> list[dict]:
     return parse_candidates(path.read_text(encoding="utf-8", errors="ignore"), source_name)
 
 
+def add_candidate(by_ip: dict[str, dict], row: dict, cf_networks: list[ipaddress.IPv4Network]) -> bool:
+    ip = row["ip"]
+    if is_cloudflare_official_ip(ip, cf_networks):
+        return False
+    item = by_ip.setdefault(ip, {
+        "ip": ip,
+        "port": row.get("port", 443),
+        "country_hint": row.get("country_hint"),
+        "sources": [],
+        "source_domains": [],
+    })
+    item["sources"] = sorted(set(item["sources"]) | set(row.get("sources") or []))
+    if row.get("source_domain"):
+        item["source_domains"] = sorted(set(item.get("source_domains") or []) | {row["source_domain"]})
+    if row.get("source_type"):
+        item["source_type"] = row["source_type"]
+    return True
+
+
 def collect_candidates() -> tuple[list[dict], list[dict]]:
     by_ip: dict[str, dict] = {}
     source_stats: list[dict] = []
-    for src in SOURCES:
-        try:
-            text = fetch_text(src["url"])
-            rows = parse_candidates(text, src["name"], src.get("countries"), src.get("ports"))
-            source_stats.append({"name": src["name"], "url": src["url"], "count": len(rows), "error": None})
-        except Exception as exc:
-            rows = []
-            source_stats.append({"name": src["name"], "url": src["url"], "count": 0, "error": str(exc)})
-        for row in rows:
-            item = by_ip.setdefault(row["ip"], {"ip": row["ip"], "port": row.get("port", 443), "country_hint": row.get("country_hint"), "sources": []})
-            item["sources"] = sorted(set(item["sources"]) | set(row.get("sources") or []))
+    cf_networks = load_cloudflare_ipv4_networks()
 
-    # 加载备用数据源
-    for src in FALLBACK_SOURCES:
+    for src in SOURCES + FALLBACK_SOURCES:
+        skipped_cf = 0
         try:
             text = fetch_text(src["url"])
             rows = parse_candidates(text, src["name"], src.get("countries"), src.get("ports"))
-            source_stats.append({"name": src["name"], "url": src["url"], "count": len(rows), "error": None})
+            for row in rows:
+                if not add_candidate(by_ip, row, cf_networks):
+                    skipped_cf += 1
+            source_stats.append({
+                "name": src["name"],
+                "type": "text_proxyip",
+                "url": src["url"],
+                "count": len(rows),
+                "accepted": len(rows) - skipped_cf,
+                "skipped_cloudflare_official": skipped_cf,
+                "error": None,
+            })
         except Exception as exc:
-            rows = []
-            source_stats.append({"name": src["name"], "url": src["url"], "count": 0, "error": str(exc)})
-        for row in rows:
-            item = by_ip.setdefault(row["ip"], {"ip": row["ip"], "port": row.get("port", 443), "country_hint": row.get("country_hint"), "sources": []})
-            item["sources"] = sorted(set(item["sources"]) | set(row.get("sources") or []))
+            source_stats.append({"name": src["name"], "type": "text_proxyip", "url": src["url"], "count": 0, "accepted": 0, "skipped_cloudflare_official": skipped_cf, "error": str(exc)})
+
+    for src in PROXYIP_DOMAIN_SOURCES:
+        resolved = 0
+        accepted = 0
+        skipped_cf = 0
+        domain_errors: dict[str, str] = {}
+        for domain in src["domains"]:
+            ips = resolve_domain(domain)
+            if not ips:
+                domain_errors[domain] = "no A record"
+                continue
+            resolved += len(ips)
+            for ip in ips:
+                row = {
+                    "ip": ip,
+                    "port": 443,
+                    "country_hint": None,
+                    "sources": [src["name"]],
+                    "source_domain": domain,
+                    "source_type": "domain_proxyip",
+                }
+                if add_candidate(by_ip, row, cf_networks):
+                    accepted += 1
+                else:
+                    skipped_cf += 1
+        source_stats.append({
+            "name": src["name"],
+            "type": "domain_proxyip",
+            "domains": src["domains"],
+            "count": resolved,
+            "accepted": accepted,
+            "skipped_cloudflare_official": skipped_cf,
+            "errors": domain_errors,
+            "error": None if accepted or resolved else "no domains resolved",
+        })
 
     for row in read_ip_file(MANUAL_ALLOWLIST, "manual_allowlist"):
-        item = by_ip.setdefault(row["ip"], {"ip": row["ip"], "port": row.get("port", 443), "country_hint": row.get("country_hint"), "sources": []})
-        item["sources"] = sorted(set(item["sources"]) | {"manual_allowlist"})
+        add_candidate(by_ip, row, cf_networks)
 
     current = read_current_ip()
     if current and valid_ipv4(current):
-        item = by_ip.setdefault(current, {"ip": current, "port": 443, "country_hint": None, "sources": []})
-        item["sources"] = sorted(set(item["sources"]) | {"current_dns"})
+        add_candidate(by_ip, {"ip": current, "port": 443, "country_hint": None, "sources": ["current_dns"]}, cf_networks)
 
     deny = {x["ip"] for x in read_ip_file(MANUAL_DENYLIST, "manual_denylist")}
     candidates = [x for x in by_ip.values() if x["ip"] not in deny]
     candidates.sort(key=lambda x: ("current_dns" not in x.get("sources", []), x["ip"]))
     return candidates[:MAX_CANDIDATES], source_stats
-
 
 def check_cmliu(ip: str, retries: int = 2) -> dict:
     url = f"{CHECK_API}?proxyip={ip}"
@@ -263,6 +365,8 @@ def enrich(item: dict, source_meta: dict | None = None) -> dict:
     latency = item.get("latency_ms") if isinstance(item.get("latency_ms"), int) else 999999
     penalty = (100 - int(score or 0)) * 1000 + (50000 if corporate else 0) + (50000 if verified else 0) + latency
     item["sources"] = source_meta.get("sources", [])
+    item["source_domains"] = source_meta.get("source_domains", [])
+    item["source_type"] = source_meta.get("source_type")
     item["source_count"] = len(item["sources"])
     item["risk"] = {
         "cf_bot_score": score,
@@ -462,6 +566,8 @@ def slim_item(item: dict) -> dict:
         "portRemote": item.get("portRemote", 443),
         "colo": risk.get("colo") or item.get("colo"),
         "sources": item.get("sources", []),
+        "source_domains": item.get("source_domains", []),
+        "source_type": item.get("source_type"),
         "source_count": item.get("source_count", len(item.get("sources", []))),
         "stable_score": item.get("stable_score"),
         "selection_reason": item.get("selection_reason"),
@@ -542,7 +648,7 @@ def main() -> None:
         "summary": {
             "source_count": len(SOURCES),
             "sources": source_stats,
-            "candidate_filter": "IPv4 only, US/443 for default source, manual allowlist supported, denylist supported, target exit region enforced",
+            "candidate_filter": "third-party ProxyIP only; Cloudflare official IP ranges excluded; IPv4 only; text/domain sources, manual allowlist and denylist supported; target exit region enforced",
             "target_countries": sorted(TARGET_COUNTRIES),
             "preferred_colos": PREFERRED_COLOS,
             "selection_policy": "single stable current IP; keep while healthy and still in target region; fail over only after consecutive validation failures",

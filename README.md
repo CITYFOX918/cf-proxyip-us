@@ -76,6 +76,20 @@ PY
 - `docs/full.json`：公開檢測報告（不包含完整 debug `all_results`）
 - `docs/v2ray.txt`：Base64 編碼的純 IP 列表；不是完整 V2Ray/VLESS 節點訂閱
 
+### 候選源策略
+
+本項目只收集「第三方中轉 ProxyIP」候選，不再使用 Cloudflare 官方 IP 段、普通 CF 優選 IP 或明顯偏 CDN 邊緣的來源。原因是本項目的用途是讓 Cloudflare 服務訪問套 CF CDN 的目標站，而不是尋找 Cloudflare 自身邊緣節點。
+
+目前來源分三類：
+
+| 類型 | 說明 |
+|---|---|
+| 文字型 ProxyIP 源 | 例如 `zip.cm.edu.kg/all.txt`，要求內容本身是 ProxyIP 候選 |
+| 域名型 ProxyIP 源 | 例如 CMLiussss 分區 ProxyIP、社區分享 ProxyIP 域名，腳本會解析 A 記錄後再檢測 |
+| 手動源 | `allowlist.txt` / `denylist.txt`，用於臨時保留或排除候選 |
+
+腳本會下載 Cloudflare 官方 IPv4 段並排除命中的候選，避免誤把 Cloudflare 自身 IP 寫入 ProxyIP 池。
+
 ## Cloudflare 部署
 
 本倉庫按「分發域名 + ProxyIP DNS-only 域名」設計，具體域名應按使用者自己的 Cloudflare zone 調整，不要直接照抄示例域名。
