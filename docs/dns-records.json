@@ -9,16 +9,16 @@
       "cf_bot_score": 99,
       "corporate_proxy": false,
       "verified_bot": false,
-      "penalty": 1084,
+      "penalty": 1349,
       "grade": "low",
       "asn": 139341,
-      "as_organization": "6 COLLYER QUAY",
-      "exit_ip": "43.152.136.223",
+      "as_organization": "16 COLLYER QUAY # 18-29 INCOME AT RAFFLES",
+      "exit_ip": "43.175.171.112",
       "country": "US",
       "city": "Ashburn",
-      "colo": "IAD"
+      "colo": "LAX"
     },
-    "latency_ms": 84,
+    "latency_ms": 349,
     "port": 443,
     "selection_reason": "kept_current_ip_still_healthy"
   }
