@@ -3,6 +3,13 @@
   "current_json": "docs/current.json",
   "current_txt": "docs/current.txt",
   "standby_txt": "docs/standby.txt",
+  "top5_txt": "docs/top5.txt",
+  "all_txt": "docs/all.txt",
+  "us_txt": "docs/us.txt",
+  "best_txt": "docs/best.txt",
+  "base64_txt": "docs/base64.txt",
+  "v2ray_txt": "docs/v2ray.txt",
   "history_json": "docs/history.json",
+  "ip_history_json": "docs/ip_history.json",
   "state_json": "docs/state.json"
 }
