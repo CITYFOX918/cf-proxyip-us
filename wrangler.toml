@@ -1,6 +1,7 @@
 name = "cf-proxyip-us"
 main = "worker.js"
 compatibility_date = "2026-05-27"
+account_id = "87b45e88da4247bc07f9c9421c2eb2e9"
 workers_dev = false
 preview_urls = false
 
