@@ -12,27 +12,13 @@ WRANGLER_TOML = Path("wrangler.toml")
 
 
 def get_kv_namespace_id() -> str:
-    text = WRANGLER_TOML.read_text(encoding="utf-8")
-    m = re.search(r'id\s*=\s*"([^"]+)"', text)
-    if not m:
-        raise RuntimeError("Cannot find KV namespace id in wrangler.toml")
-    return m.group(1)
-
+    return "4e593e914be0433994a2a1ddce6f5a07"
 
 def get_account_id() -> str:
-    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
-    if not account_id:
-        raise RuntimeError("Missing CLOUDFLARE_ACCOUNT_ID environment variable")
-    return account_id
-
+    return "87b45e88da4247bc07f9c9421c2eb2e9"
 
 def get_api_token() -> str:
-    token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("Missing CLOUDFLARE_API_TOKEN environment variable")
-    return token
-
-
+    return "cfut_qjCYSpGHf9ofOv5fDrdCjxSwdgbodUuKxVIZbrW730f397ad"
 def slim_full(data: dict) -> dict:
     """Strip all_results from full.json before uploading to KV to save bandwidth."""
     return {k: v for k, v in data.items() if k != "all_results"}
